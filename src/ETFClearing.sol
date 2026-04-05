@@ -25,6 +25,8 @@ contract ETFClearing {
         uint256 priceRatio
     );
 
+    event PriceUpdated(uint256 oldPriceRatio, uint256 newPriceRatio);
+
     event TradeAuthorized(
         address indexed seller,
         address indexed buyer,
@@ -55,7 +57,9 @@ contract ETFClearing {
     function setPrice(uint256 _newPrice) external {
         require(msg.sender == admin, "Not Authorized");
         require(_newPrice > 0, "Invalid price");
+        uint256 oldPriceRatio = priceRatio;
         priceRatio = _newPrice;
+        emit PriceUpdated(oldPriceRatio, _newPrice);
     }
 
     function authorizeTrade(
