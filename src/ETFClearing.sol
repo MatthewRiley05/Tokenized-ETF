@@ -13,6 +13,7 @@ interface IKYC {
 contract ETFClearing {
     // 1. State Variables
     address public admin;
+    address public pendingAdmin;
     IERC20 public eHKD;      // The eHKD Token contract
     IERC20 public etfVault;  // The ETF (ERC-4626) contract
     IKYC public kycRegistry; // The Whitelist contract
@@ -26,6 +27,8 @@ contract ETFClearing {
     );
 
     event PriceUpdated(uint256 oldPriceRatio, uint256 newPriceRatio);
+    event AdminTransferStarted(address indexed previousAdmin, address indexed newAdmin);
+    event AdminTransferAccepted(address indexed previousAdmin, address indexed newAdmin);
 
     event TradeAuthorized(
         address indexed seller,
@@ -37,8 +40,10 @@ contract ETFClearing {
     );
 
     // 2. The Exchange Ratio (Price)
-    // Example: 1 ETF unit = 1000 eHKD
-    uint256 public priceRatio = 1000;
+    // priceRatio is fixed-point with PRICE_SCALE decimals.
+    // Example: if 1 ETF = 1000 eHKD, set priceRatio = 1000 * PRICE_SCALE.
+    uint256 public constant PRICE_SCALE = 1e18;
+    uint256 public priceRatio = 1000 * PRICE_SCALE;
 
     mapping(bytes32 => bool) public authorizedTrades;
 
@@ -60,6 +65,22 @@ contract ETFClearing {
         uint256 oldPriceRatio = priceRatio;
         priceRatio = _newPrice;
         emit PriceUpdated(oldPriceRatio, _newPrice);
+    }
+
+    function transferAdmin(address newAdmin) external {
+        require(msg.sender == admin, "Not Authorized");
+        require(newAdmin != address(0), "Invalid admin address");
+        require(newAdmin != admin, "Already admin");
+        pendingAdmin = newAdmin;
+        emit AdminTransferStarted(admin, newAdmin);
+    }
+
+    function acceptAdmin() external {
+        require(msg.sender == pendingAdmin, "Not pending admin");
+        address previousAdmin = admin;
+        admin = msg.sender;
+        pendingAdmin = address(0);
+        emit AdminTransferAccepted(previousAdmin, msg.sender);
     }
 
     function authorizeTrade(
@@ -105,12 +126,17 @@ contract ETFClearing {
         delete authorizedTrades[tradeId];
 
         uint256 eHKDAmount = etfAmount * priceRatio;
+        eHKDAmount = eHKDAmount / PRICE_SCALE;
 
         _safeTransferFrom(eHKD, buyer, seller, eHKDAmount, "eHKD transfer failed");
 
         _safeTransferFrom(etfVault, seller, buyer, etfAmount, "ETF transfer failed");
 
         emit TradeCompleted(buyer, seller, etfAmount, eHKDAmount, priceRatio);
+    }
+
+    function quoteEHKD(uint256 etfAmount) external view returns (uint256) {
+        return (etfAmount * priceRatio) / PRICE_SCALE;
     }
 
     function _tradeId(
@@ -134,8 +160,17 @@ contract ETFClearing {
             abi.encodeWithSelector(token.transferFrom.selector, from, to, amount)
         );
 
-        require(success, errorMessage);
+        if (!success) {
+            if (data.length > 0) {
+                assembly {
+                    revert(add(data, 32), mload(data))
+                }
+            }
+            revert(errorMessage);
+        }
+
         if (data.length > 0) {
+            require(data.length == 32, errorMessage);
             require(abi.decode(data, (bool)), errorMessage);
         }
     }
