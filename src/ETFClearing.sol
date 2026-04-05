@@ -58,12 +58,27 @@ contract ETFClearing {
 
         uint256 eHKDAmount = etfAmount * priceRatio;
 
-        bool eHKDSent = eHKD.transferFrom(buyer, seller, eHKDAmount);
-        require(eHKDSent, "eHKD transfer failed");
+        _safeTransferFrom(eHKD, buyer, seller, eHKDAmount, "eHKD transfer failed");
 
-        bool etfSent = etfVault.transferFrom(seller, buyer, etfAmount);
-        require(etfSent, "ETF transfer failed");
+        _safeTransferFrom(etfVault, seller, buyer, etfAmount, "ETF transfer failed");
 
         emit TradeCompleted(buyer, seller, etfAmount, eHKDAmount, priceRatio);
+    }
+
+    function _safeTransferFrom(
+        IERC20 token,
+        address from,
+        address to,
+        uint256 amount,
+        string memory errorMessage
+    ) internal {
+        (bool success, bytes memory data) = address(token).call(
+            abi.encodeWithSelector(token.transferFrom.selector, from, to, amount)
+        );
+
+        require(success, errorMessage);
+        if (data.length > 0) {
+            require(abi.decode(data, (bool)), errorMessage);
+        }
     }
 }
