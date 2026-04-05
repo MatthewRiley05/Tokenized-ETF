@@ -3,7 +3,6 @@ pragma solidity ^0.8.20;
 
 interface IERC20 {
     function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
-    function balanceOf(address account) external view returns (uint256);
 }
 
 interface IKYC {
@@ -11,12 +10,11 @@ interface IKYC {
 }
 
 contract ETFClearing {
-    // 1. State Variables
     address public admin;
     address public pendingAdmin;
-    IERC20 public eHKD;      // The eHKD Token contract
-    IERC20 public etfVault;  // The ETF (ERC-4626) contract
-    IKYC public kycRegistry; // The Whitelist contract
+    IERC20 public immutable eHKD;
+    IERC20 public immutable etfVault;
+    IKYC public immutable kycRegistry;
 
     event TradeCompleted(
         address indexed buyer,
@@ -39,13 +37,15 @@ contract ETFClearing {
         bytes32 tradeId
     );
 
-    // 2. The Exchange Ratio (Price)
-    // priceRatio is fixed-point with PRICE_SCALE decimals.
-    // Example: if 1 ETF = 1000 eHKD, set priceRatio = 1000 * PRICE_SCALE.
     uint256 public constant PRICE_SCALE = 1e18;
     uint256 public priceRatio = 1000 * PRICE_SCALE;
 
     mapping(bytes32 => bool) public authorizedTrades;
+
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "Not Authorized");
+        _;
+    }
 
     constructor(address _eHKD, address _etfVault, address _kyc) {
         require(_eHKD != address(0), "Invalid eHKD address");
@@ -58,17 +58,14 @@ contract ETFClearing {
         kycRegistry = IKYC(_kyc);
     }
 
-    // 3. Function to update the price (Only Admin)
-    function setPrice(uint256 _newPrice) external {
-        require(msg.sender == admin, "Not Authorized");
+    function setPrice(uint256 _newPrice) external onlyAdmin {
         require(_newPrice > 0, "Invalid price");
         uint256 oldPriceRatio = priceRatio;
         priceRatio = _newPrice;
         emit PriceUpdated(oldPriceRatio, _newPrice);
     }
 
-    function transferAdmin(address newAdmin) external {
-        require(msg.sender == admin, "Not Authorized");
+    function transferAdmin(address newAdmin) external onlyAdmin {
         require(newAdmin != address(0), "Invalid admin address");
         require(newAdmin != admin, "Already admin");
         pendingAdmin = newAdmin;
@@ -89,8 +86,7 @@ contract ETFClearing {
         uint256 expectedPriceRatio,
         uint256 deadline
     ) external {
-        require(buyer != address(0), "Invalid buyer address");
-        require(msg.sender != buyer, "Buyer and seller must differ");
+        _validateParticipants(buyer, msg.sender);
         require(etfAmount > 0, "Invalid ETF amount");
         require(expectedPriceRatio > 0, "Invalid price");
         require(deadline >= block.timestamp, "Authorization expired");
@@ -111,9 +107,7 @@ contract ETFClearing {
         uint256 deadline
     ) external {
         require(msg.sender == buyer, "Caller must be buyer");
-        require(buyer != address(0), "Invalid buyer address");
-        require(seller != address(0), "Invalid seller address");
-        require(buyer != seller, "Buyer and seller must differ");
+        _validateParticipants(buyer, seller);
         require(etfAmount > 0, "Invalid ETF amount");
         require(expectedPriceRatio > 0, "Invalid price");
         require(deadline >= block.timestamp, "Trade expired");
@@ -125,18 +119,26 @@ contract ETFClearing {
         require(authorizedTrades[tradeId], "Seller did not authorize trade");
         delete authorizedTrades[tradeId];
 
-        uint256 eHKDAmount = etfAmount * priceRatio;
-        eHKDAmount = eHKDAmount / PRICE_SCALE;
+        uint256 eHKDAmount = _quote(etfAmount, priceRatio);
 
         _safeTransferFrom(eHKD, buyer, seller, eHKDAmount, "eHKD transfer failed");
-
         _safeTransferFrom(etfVault, seller, buyer, etfAmount, "ETF transfer failed");
 
         emit TradeCompleted(buyer, seller, etfAmount, eHKDAmount, priceRatio);
     }
 
     function quoteEHKD(uint256 etfAmount) external view returns (uint256) {
-        return (etfAmount * priceRatio) / PRICE_SCALE;
+        return _quote(etfAmount, priceRatio);
+    }
+
+    function _quote(uint256 etfAmount, uint256 ratio) internal pure returns (uint256) {
+        return (etfAmount * ratio) / PRICE_SCALE;
+    }
+
+    function _validateParticipants(address buyer, address seller) internal pure {
+        require(buyer != address(0), "Invalid buyer address");
+        require(seller != address(0), "Invalid seller address");
+        require(buyer != seller, "Buyer and seller must differ");
     }
 
     function _tradeId(
