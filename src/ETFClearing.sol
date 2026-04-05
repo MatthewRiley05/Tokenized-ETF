@@ -29,15 +29,15 @@ contract ETFClearing {
     // Example: 1 ETF unit = 1000 eHKD
     uint256 public priceRatio = 1000;
 
-    constructor(address _eHKD, address _etfVault, address _kyC) {
+    constructor(address _eHKD, address _etfVault, address _kyc) {
         require(_eHKD != address(0), "Invalid eHKD address");
         require(_etfVault != address(0), "Invalid ETF address");
-        require(_kyC != address(0), "Invalid KYC address");
+        require(_kyc != address(0), "Invalid KYC address");
 
         admin = msg.sender;
         eHKD = IERC20(_eHKD);
         etfVault = IERC20(_etfVault);
-        kycRegistry = IKYC(_kyC);
+        kycRegistry = IKYC(_kyc);
     }
 
     // 3. Function to update the price (Only Admin)
