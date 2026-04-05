@@ -30,6 +30,10 @@ contract ETFClearing {
     uint256 public priceRatio = 1000;
 
     constructor(address _eHKD, address _etfVault, address _kyC) {
+        require(_eHKD != address(0), "Invalid eHKD address");
+        require(_etfVault != address(0), "Invalid ETF address");
+        require(_kyC != address(0), "Invalid KYC address");
+
         admin = msg.sender;
         eHKD = IERC20(_eHKD);
         etfVault = IERC20(_etfVault);
@@ -45,6 +49,9 @@ contract ETFClearing {
 
     function executeTrade(address buyer, address seller, uint256 etfAmount) external {
         require(msg.sender == buyer, "Caller must be buyer");
+        require(buyer != address(0), "Invalid buyer address");
+        require(seller != address(0), "Invalid seller address");
+        require(buyer != seller, "Buyer and seller must differ");
         require(etfAmount > 0, "Invalid ETF amount");
         require(kycRegistry.isWhitelisted(buyer), "Buyer not whitelisted");
         require(kycRegistry.isWhitelisted(seller), "Seller not whitelisted");
