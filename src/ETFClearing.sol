@@ -1,20 +1,30 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-interface IERC20 {
-    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
-}
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "./interfaces/IKYC.sol";
 
-interface IKYC {
-    function isWhitelisted(address user) external view returns (bool);
-}
+contract ETFClearing is Ownable2Step, ReentrancyGuard {
+    using SafeERC20 for IERC20;
 
-contract ETFClearing {
-    address public admin;
-    address public pendingAdmin;
     IERC20 public immutable eHKD;
     IERC20 public immutable etfVault;
     IKYC public immutable kycRegistry;
+
+    error InvalidAddress();
+    error InvalidParticipants();
+    error InvalidAmount();
+    error InvalidPrice();
+    error AuthorizationExpired();
+    error TradeExpired();
+    error NotBuyer();
+    error BuyerNotWhitelisted();
+    error SellerNotWhitelisted();
+    error PriceMoved(uint256 expected, uint256 actual);
+    error TradeNotAuthorized();
 
     event TradeCompleted(
         address indexed buyer,
@@ -25,8 +35,6 @@ contract ETFClearing {
     );
 
     event PriceUpdated(uint256 oldPriceRatio, uint256 newPriceRatio);
-    event AdminTransferStarted(address indexed previousAdmin, address indexed newAdmin);
-    event AdminTransferAccepted(address indexed previousAdmin, address indexed newAdmin);
 
     event TradeAuthorized(
         address indexed seller,
@@ -42,42 +50,38 @@ contract ETFClearing {
 
     mapping(bytes32 => bool) public authorizedTrades;
 
-    modifier onlyAdmin() {
-        require(msg.sender == admin, "Not Authorized");
-        _;
-    }
+    constructor(address _eHKD, address _etfVault, address _kyc) Ownable(msg.sender) {
+        if (_eHKD == address(0) || _etfVault == address(0) || _kyc == address(0)) {
+            revert InvalidAddress();
+        }
 
-    constructor(address _eHKD, address _etfVault, address _kyc) {
-        require(_eHKD != address(0), "Invalid eHKD address");
-        require(_etfVault != address(0), "Invalid ETF address");
-        require(_kyc != address(0), "Invalid KYC address");
-
-        admin = msg.sender;
         eHKD = IERC20(_eHKD);
         etfVault = IERC20(_etfVault);
         kycRegistry = IKYC(_kyc);
     }
 
-    function setPrice(uint256 _newPrice) external onlyAdmin {
-        require(_newPrice > 0, "Invalid price");
+    function setPriceRatioScaled(uint256 _newPrice) public onlyOwner {
+        if (_newPrice == 0) revert InvalidPrice();
         uint256 oldPriceRatio = priceRatio;
         priceRatio = _newPrice;
         emit PriceUpdated(oldPriceRatio, _newPrice);
     }
 
-    function transferAdmin(address newAdmin) external onlyAdmin {
-        require(newAdmin != address(0), "Invalid admin address");
-        require(newAdmin != admin, "Already admin");
-        pendingAdmin = newAdmin;
-        emit AdminTransferStarted(admin, newAdmin);
+    function setPrice(uint256 _newPrice) external onlyOwner {
+        setPriceRatioScaled(_newPrice);
+    }
+
+    function setPriceUnscaled(uint256 _newNominalPrice) external onlyOwner {
+        if (_newNominalPrice == 0) revert InvalidPrice();
+        setPriceRatioScaled(_newNominalPrice * PRICE_SCALE);
+    }
+
+    function transferAdmin(address newAdmin) external onlyOwner {
+        transferOwnership(newAdmin);
     }
 
     function acceptAdmin() external {
-        require(msg.sender == pendingAdmin, "Not pending admin");
-        address previousAdmin = admin;
-        admin = msg.sender;
-        pendingAdmin = address(0);
-        emit AdminTransferAccepted(previousAdmin, msg.sender);
+        acceptOwnership();
     }
 
     function authorizeTrade(
@@ -87,11 +91,11 @@ contract ETFClearing {
         uint256 deadline
     ) external {
         _validateParticipants(buyer, msg.sender);
-        require(etfAmount > 0, "Invalid ETF amount");
-        require(expectedPriceRatio > 0, "Invalid price");
-        require(deadline >= block.timestamp, "Authorization expired");
-        require(kycRegistry.isWhitelisted(msg.sender), "Seller not whitelisted");
-        require(kycRegistry.isWhitelisted(buyer), "Buyer not whitelisted");
+        if (etfAmount == 0) revert InvalidAmount();
+        if (expectedPriceRatio == 0) revert InvalidPrice();
+        if (deadline < block.timestamp) revert AuthorizationExpired();
+        if (!kycRegistry.isWhitelisted(msg.sender)) revert SellerNotWhitelisted();
+        if (!kycRegistry.isWhitelisted(buyer)) revert BuyerNotWhitelisted();
 
         bytes32 tradeId = _tradeId(buyer, msg.sender, etfAmount, expectedPriceRatio, deadline);
         authorizedTrades[tradeId] = true;
@@ -105,24 +109,24 @@ contract ETFClearing {
         uint256 etfAmount,
         uint256 expectedPriceRatio,
         uint256 deadline
-    ) external {
-        require(msg.sender == buyer, "Caller must be buyer");
+    ) external nonReentrant {
+        if (msg.sender != buyer) revert NotBuyer();
         _validateParticipants(buyer, seller);
-        require(etfAmount > 0, "Invalid ETF amount");
-        require(expectedPriceRatio > 0, "Invalid price");
-        require(deadline >= block.timestamp, "Trade expired");
-        require(priceRatio == expectedPriceRatio, "Price moved");
-        require(kycRegistry.isWhitelisted(buyer), "Buyer not whitelisted");
-        require(kycRegistry.isWhitelisted(seller), "Seller not whitelisted");
+        if (etfAmount == 0) revert InvalidAmount();
+        if (expectedPriceRatio == 0) revert InvalidPrice();
+        if (deadline < block.timestamp) revert TradeExpired();
+        if (priceRatio != expectedPriceRatio) revert PriceMoved(expectedPriceRatio, priceRatio);
+        if (!kycRegistry.isWhitelisted(buyer)) revert BuyerNotWhitelisted();
+        if (!kycRegistry.isWhitelisted(seller)) revert SellerNotWhitelisted();
 
         bytes32 tradeId = _tradeId(buyer, seller, etfAmount, expectedPriceRatio, deadline);
-        require(authorizedTrades[tradeId], "Seller did not authorize trade");
+        if (!authorizedTrades[tradeId]) revert TradeNotAuthorized();
         delete authorizedTrades[tradeId];
 
         uint256 eHKDAmount = _quote(etfAmount, priceRatio);
 
-        _safeTransferFrom(eHKD, buyer, seller, eHKDAmount, "eHKD transfer failed");
-        _safeTransferFrom(etfVault, seller, buyer, etfAmount, "ETF transfer failed");
+        eHKD.safeTransferFrom(buyer, seller, eHKDAmount);
+        etfVault.safeTransferFrom(seller, buyer, etfAmount);
 
         emit TradeCompleted(buyer, seller, etfAmount, eHKDAmount, priceRatio);
     }
@@ -136,9 +140,8 @@ contract ETFClearing {
     }
 
     function _validateParticipants(address buyer, address seller) internal pure {
-        require(buyer != address(0), "Invalid buyer address");
-        require(seller != address(0), "Invalid seller address");
-        require(buyer != seller, "Buyer and seller must differ");
+        if (buyer == address(0) || seller == address(0)) revert InvalidAddress();
+        if (buyer == seller) revert InvalidParticipants();
     }
 
     function _tradeId(
@@ -151,29 +154,4 @@ contract ETFClearing {
         return keccak256(abi.encode(buyer, seller, etfAmount, expectedPriceRatio, deadline));
     }
 
-    function _safeTransferFrom(
-        IERC20 token,
-        address from,
-        address to,
-        uint256 amount,
-        string memory errorMessage
-    ) internal {
-        (bool success, bytes memory data) = address(token).call(
-            abi.encodeWithSelector(token.transferFrom.selector, from, to, amount)
-        );
-
-        if (!success) {
-            if (data.length > 0) {
-                assembly {
-                    revert(add(data, 32), mload(data))
-                }
-            }
-            revert(errorMessage);
-        }
-
-        if (data.length > 0) {
-            require(data.length == 32, errorMessage);
-            require(abi.decode(data, (bool)), errorMessage);
-        }
-    }
 }
